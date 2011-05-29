@@ -14,7 +14,7 @@ static bool flag_print_all = 0;
 // Print records layout
 static bool flag_print_layout = 1;
 // Process all types, not only from main translation unit
-static bool flag_process_all = 1;
+static bool flag_process_all = 0;
 
 int plugin_is_GPL_compatible;
 static struct plugin_info recordsize_plugin_info = { "0.1", "Record size plugin" };
@@ -22,7 +22,6 @@ static struct plugin_info recordsize_plugin_info = { "0.1", "Record size plugin"
 static void print_unknown_node(const tree node, const char* msg)
 {
     int tc = TREE_CODE(node);
-    
     fprintf(stderr, "%s; node class name: %s, code name: %s", msg, TREE_CODE_CLASS_STRING(TREE_CODE_CLASS(tc)), tree_code_name[tc]);
 }
 
@@ -69,6 +68,9 @@ static void recordsize_finish_type(void *gcc_data, void *plugin_data)
     {
 	if (flag_print_unknown) print_unknown_node(type_decl, "Don't know how to handle record_type with such name node");
     }
+
+    // Ignoring types not from main translation unit
+    if (!flag_process_all && !MAIN_FILE_P(linemap_lookup(line_table, DECL_SOURCE_LOCATION(type_decl)))) return;
 
     int lastBaseIdx = -1;
     int maxAlignFieldIdx = -1;

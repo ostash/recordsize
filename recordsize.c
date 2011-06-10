@@ -7,17 +7,26 @@
 #include <defaults.h>
 #include <langhooks.h>
 
-// Print messages about nodes we don't know how to handel
+// Print messages about nodes we don't know how to handle
 static bool flag_print_unknown = 1;
 // Print information about all types, even with optimal size
 static bool flag_print_all = 0;
 // Print records layout
 static bool flag_print_layout = 1;
-// Process all types, not only from main translation unit
-static bool flag_process_all = 0;
+// How deep go into includes
+enum {
+    // Only main translation unit
+    RS_MAIN,
+    // Every user include
+    RS_USER,
+    // Everything, even system includes
+    RS_ALL
+};
+
+static int param_process = RS_MAIN;
 
 int plugin_is_GPL_compatible;
-static struct plugin_info recordsize_plugin_info = { "0.1", "Record size plugin" };
+static struct plugin_info recordsize_plugin_info = { "0.2", "Record size plugin" };
 
 static void print_unknown_node(const tree node, const char* msg)
 {
@@ -70,7 +79,17 @@ static void recordsize_finish_type(void *gcc_data, void *plugin_data)
     }
 
     // Ignoring types not from main translation unit
-    if (!flag_process_all && !MAIN_FILE_P(linemap_lookup(line_table, DECL_SOURCE_LOCATION(type_decl)))) return;
+    const struct line_map *map = linemap_lookup(line_table, DECL_SOURCE_LOCATION(type_decl));
+    switch (param_process)
+    {
+    case RS_MAIN:
+	if (!MAIN_FILE_P(map)) return;
+	break;
+    case RS_USER:
+	if (map->sysp != 0) return;
+    case RS_ALL:
+	;
+    }
 
     int lastBaseIdx = -1;
     int maxAlignFieldIdx = -1;
@@ -167,12 +186,30 @@ int plugin_init(struct plugin_name_args* info, struct plugin_gcc_version* ver)
 	{
 	    if (strcmp(info->argv[i].key, "print-unknown") == 0)
 		flag_print_unknown = 1;
-	    if (strcmp(info->argv[i].key, "print-all") == 0)
+	    else if (strcmp(info->argv[i].key, "print-all") == 0)
 		flag_print_all = 1;
-	    if (strcmp(info->argv[i].key, "print-layout") == 0)
+	    else if (strcmp(info->argv[i].key, "print-layout") == 0)
 		flag_print_layout = 1;
-	    if (strcmp(info->argv[i].key, "process-all") == 0)
-		flag_process_all = 1;
+	    else if (strcmp(info->argv[i].key, "process") == 0)
+	    {
+		if (!info->argv[i].value)
+		{
+		    fprintf(stderr, "No argument for process option\n");
+		    return 1;
+		}
+		else if (strcmp(info->argv[i].value, "main") == 0)
+		    param_process = RS_MAIN;
+		else if (strcmp(info->argv[i].value, "user") == 0)
+		    param_process = RS_USER;
+		else if (strcmp(info->argv[i].value, "all") == 0)
+		    param_process = RS_ALL;
+		else
+		{
+		    fprintf(stderr, "Unknown argument \"%s\" for process option\n",
+			info->argv[i].value);
+		    return 1;
+		}
+	    }
 	}
     }
 

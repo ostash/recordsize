@@ -8,6 +8,11 @@ extern "C" {
 #include <defaults.h>
 #include <langhooks.h>
 }
+
+#include "FieldInfo.h"
+
+#include <vector>
+
 // Print messages about nodes we don't know how to handle
 static bool flag_print_unknown = 1;
 // Print information about all types, even with optimal size
@@ -33,28 +38,6 @@ static void print_unknown_node(const tree node, const char* msg)
 {
     int tc = TREE_CODE(node);
     fprintf(stderr, "%s; node class name: %s, code name: %s", msg, TREE_CODE_CLASS_STRING(TREE_CODE_CLASS(tc)), tree_code_name[tc]);
-}
-
-struct FieldInfo
-{
-    const char* name;
-    size_t size;
-    size_t offset;
-    size_t align;
-    bool isBase;
-};
-
-static bool getFieldInfo(const tree field, struct FieldInfo* fi)
-{
-    // Can't understand how this can happen and what it means
-    if (!DECL_SIZE(field) || !DECL_FIELD_OFFSET(field) || !DECL_FIELD_BIT_OFFSET(field)) return false;
-
-    fi->isBase = DECL_ARTIFICIAL(field);
-    fi->name = fi->isBase ? "base class" : DECL_NAME(field) ? IDENTIFIER_POINTER(DECL_NAME(field)) : "unnamed";
-    fi->size = TREE_INT_CST_LOW(DECL_SIZE(field)) / BITS_PER_UNIT;
-    fi->offset = TREE_INT_CST_LOW(DECL_FIELD_OFFSET(field)) + TREE_INT_CST_LOW(DECL_FIELD_BIT_OFFSET(field)) / BITS_PER_UNIT;
-    fi->align = DECL_ALIGN(field) / BITS_PER_UNIT;
-    return true;
 }
 
 static void recordsize_finish_type(void *gcc_data, void *plugin_data)
@@ -96,33 +79,28 @@ static void recordsize_finish_type(void *gcc_data, void *plugin_data)
     int maxAlignFieldIdx = -1;
     // Up to 128-byte alignment
     size_t sizes[7] = {0, 0, 0, 0, 0, 0, 0};
-    size_t maxFields = 64;
-    size_t fieldCount = 0;
-    struct FieldInfo* fields = (struct FieldInfo*) xmalloc(maxFields * sizeof(struct FieldInfo));
+    std::vector<FieldInfo> fields;
 
     for (tree field = TYPE_FIELDS(record_type); field; field = TREE_CHAIN(field))
     {
 	switch(TREE_CODE(field))
 	{
 	case FIELD_DECL:
-	    // Ingoring records with bit-fields
-	    if (DECL_BIT_FIELD(field) || !getFieldInfo(field, &fields[fieldCount])) { free(fields); return; }
+	{
+	    FieldInfo fi(field);
+	    if (fi.size() == 0) { return; }
 
-	    if (fields[fieldCount].isBase && (lastBaseIdx == -1 || fields[fieldCount].offset >= fields[lastBaseIdx].offset))
-		lastBaseIdx = fieldCount;
+	    if (fi.isBase() && (lastBaseIdx == -1 || fi.offset() >= fields[lastBaseIdx].offset()))
+		lastBaseIdx = fields.size();
 	    else
 	    {
-		sizes[exact_log2(fields[fieldCount].align)] += fields[fieldCount].size;
-		if (maxAlignFieldIdx == -1 || fields[fieldCount].align > fields[maxAlignFieldIdx].align)
-		    maxAlignFieldIdx = fieldCount;
+		sizes[exact_log2(fi.align())] += fi.size();
+		if (maxAlignFieldIdx == -1 || fi.align() > fields[maxAlignFieldIdx].align())
+		    maxAlignFieldIdx = fields.size();
 	    }
-	    fieldCount++;
-	    if (fieldCount == maxFields)
-	    {
-		maxFields *= 2;
-		fields = (struct FieldInfo*) xrealloc(fields, maxFields);
-	    }
+	    fields.push_back(fi);
 	    break;
+	}
 	case VAR_DECL:
 	case CONST_DECL:
 	case TYPE_DECL:
@@ -131,12 +109,12 @@ static void recordsize_finish_type(void *gcc_data, void *plugin_data)
 	    break;
 	default:
 	    if (flag_print_unknown) print_unknown_node(field, "Don't know how to handle field with such name node");
-	    free(fields);
 	    return;
 	}
     }
 
-    if (fieldCount == 0) { free(fields); return; }
+    if (fields.empty())
+        return;
 
     size_t minFieldsSize = 0;
     for (size_t i = 0; i < sizeof(sizes)/sizeof(size_t); ++i) minFieldsSize += sizes[i];
@@ -148,15 +126,15 @@ static void recordsize_finish_type(void *gcc_data, void *plugin_data)
     size_t endOfBases = 0;
     if (lastBaseIdx != -1)
     {
-	endOfBases = fields[lastBaseIdx].offset + (fields[lastBaseIdx].size / fields[lastBaseIdx].align) * fields[lastBaseIdx].align;
-	if (fields[lastBaseIdx].size % fields[lastBaseIdx].align) endOfBases += fields[lastBaseIdx].align;
+	endOfBases = fields[lastBaseIdx].offset() + (fields[lastBaseIdx].size() / fields[lastBaseIdx].align()) * fields[lastBaseIdx].align();
+	if (fields[lastBaseIdx].size() % fields[lastBaseIdx].align()) endOfBases += fields[lastBaseIdx].align();
     }
 
     size_t prePadding = 0;
     if (maxAlignFieldIdx != -1)
     {
-	size_t modulus = endOfBases % fields[maxAlignFieldIdx].align;
-	if (modulus) prePadding = fields[maxAlignFieldIdx].align - modulus;
+	size_t modulus = endOfBases % fields[maxAlignFieldIdx].align();
+	if (modulus) prePadding = fields[maxAlignFieldIdx].align() - modulus;
     }
 
     size_t recordSize = TREE_INT_CST_LOW(TYPE_SIZE(record_type)) / BITS_PER_UNIT;
@@ -172,11 +150,10 @@ static void recordsize_finish_type(void *gcc_data, void *plugin_data)
 	if (flag_print_layout)
 	{
 	    fprintf(stderr, "# %-32s %-7s %-7s %-7s\n", "Name", "Offset", "Size", "Align");
-	    for (size_t i = 0; i < fieldCount; ++i)
-		fprintf(stderr, "%zu %-32s %7zu %7zu %7zu\n", i, fields[i].name, fields[i].offset, fields[i].size, fields[i].align);
+	    for (size_t i = 0; i < fields.size(); ++i)
+		fprintf(stderr, "%zu %-32s %7zu %7zu %7zu\n", i, fields[i].name().c_str(), fields[i].offset(), fields[i].size(), fields[i].align());
 	}
     }
-    free(fields);
 }
 
 int plugin_init(struct plugin_name_args* info, struct plugin_gcc_version* ver)

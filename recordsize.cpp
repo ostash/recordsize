@@ -1,12 +1,13 @@
 #include <gmp.h>
 
+extern "C" {
 #include <gcc-plugin.h>
 #include <tree.h>
 #include <diagnostic.h>
 #include <toplev.h>
 #include <defaults.h>
 #include <langhooks.h>
-
+}
 // Print messages about nodes we don't know how to handle
 static bool flag_print_unknown = 1;
 // Print information about all types, even with optimal size
@@ -119,7 +120,7 @@ static void recordsize_finish_type(void *gcc_data, void *plugin_data)
 	    if (fieldCount == maxFields)
 	    {
 		maxFields *= 2;
-		fields = xrealloc(fields, maxFields);
+		fields = (struct FieldInfo*) xrealloc(fields, maxFields);
 	    }
 	    break;
 	case VAR_DECL:

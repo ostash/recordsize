@@ -31,7 +31,7 @@ enum {
 
 static int param_process = RS_MAIN;
 
-int plugin_is_GPL_compatible;
+int plugin_is_GPL_compatible __attribute__ ((visibility ("default")));;
 static struct plugin_info recordsize_plugin_info = { "0.2", "Record size plugin" };
 
 static void print_unknown_node(const tree node, const char* msg)
@@ -155,6 +155,8 @@ static void recordsize_finish_type(void *gcc_data, void *plugin_data)
     }
   }
 }
+
+int plugin_init(struct plugin_name_args* info, struct plugin_gcc_version* ver) __attribute__ ((visibility ("default")));
 
 int plugin_init(struct plugin_name_args* info, struct plugin_gcc_version* ver)
 {

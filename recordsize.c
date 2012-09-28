@@ -7,6 +7,8 @@
 #include <defaults.h>
 #include <langhooks.h>
 
+#include "FieldInfo.h"
+
 // Print messages about nodes we don't know how to handle
 static bool flag_print_unknown = 1;
 // Print information about all types, even with optimal size
@@ -34,26 +36,13 @@ static void print_unknown_node(const tree node, const char* msg)
   fprintf(stderr, "%s; node class name: %s, code name: %s", msg, TREE_CODE_CLASS_STRING(TREE_CODE_CLASS(tc)), tree_code_name[tc]);
 }
 
-struct FieldInfo
+static void freeFields(struct FieldInfo** fields, size_t maxFields)
 {
-  const char* name;
-  size_t size;
-  size_t offset;
-  size_t align;
-  bool isBase;
-};
+  for (size_t i = 0; i < maxFields; i++)
+    if (fields[i])
+      deleteFieldInfo(fields[i]);
 
-static bool getFieldInfo(const tree field, struct FieldInfo* fi)
-{
-  // Can't understand how this can happen and what it means
-  if (!DECL_SIZE(field) || !DECL_FIELD_OFFSET(field) || !DECL_FIELD_BIT_OFFSET(field)) return false;
-
-  fi->isBase = DECL_ARTIFICIAL(field);
-  fi->name = fi->isBase ? "base class" : DECL_NAME(field) ? IDENTIFIER_POINTER(DECL_NAME(field)) : "unnamed";
-  fi->size = TREE_INT_CST_LOW(DECL_SIZE(field)) / BITS_PER_UNIT;
-  fi->offset = TREE_INT_CST_LOW(DECL_FIELD_OFFSET(field)) + TREE_INT_CST_LOW(DECL_FIELD_BIT_OFFSET(field)) / BITS_PER_UNIT;
-  fi->align = DECL_ALIGN(field) / BITS_PER_UNIT;
-  return true;
+  free(fields);
 }
 
 static void recordsize_finish_type(void *gcc_data, void *plugin_data)
@@ -97,7 +86,7 @@ static void recordsize_finish_type(void *gcc_data, void *plugin_data)
   size_t sizes[7] = {0, 0, 0, 0, 0, 0, 0};
   size_t maxFields = 64;
   size_t fieldCount = 0;
-  struct FieldInfo* fields = (struct FieldInfo*) xmalloc(maxFields * sizeof(struct FieldInfo));
+  struct FieldInfo** fields = (struct FieldInfo**) xcalloc(maxFields, sizeof(struct FieldInfo*));
 
   for (tree field = TYPE_FIELDS(record_type); field; field = TREE_CHAIN(field))
   {
@@ -105,21 +94,22 @@ static void recordsize_finish_type(void *gcc_data, void *plugin_data)
     {
     case FIELD_DECL:
       // Ingoring records with bit-fields
-      if (DECL_BIT_FIELD(field) || !getFieldInfo(field, &fields[fieldCount])) { free(fields); return; }
+      if (DECL_BIT_FIELD(field) || (fields[fieldCount] = createFieldInfo(field)) == NULL) { freeFields(fields, maxFields); return; }
 
-      if (fields[fieldCount].isBase && (lastBaseIdx == -1 || fields[fieldCount].offset >= fields[lastBaseIdx].offset))
+      if (fields[fieldCount]->isBase && (lastBaseIdx == -1 || fields[fieldCount]->offset >= fields[lastBaseIdx]->offset))
         lastBaseIdx = fieldCount;
       else
       {
-        sizes[exact_log2(fields[fieldCount].align)] += fields[fieldCount].size;
-        if (maxAlignFieldIdx == -1 || fields[fieldCount].align > fields[maxAlignFieldIdx].align)
+        sizes[exact_log2(fields[fieldCount]->align)] += fields[fieldCount]->size / BITS_PER_UNIT;
+        if (maxAlignFieldIdx == -1 || fields[fieldCount]->align > fields[maxAlignFieldIdx]->align / BITS_PER_UNIT)
           maxAlignFieldIdx = fieldCount;
       }
       fieldCount++;
       if (fieldCount == maxFields)
       {
+        fields = xrealloc(fields, maxFields * 2);
+        memset(fields + maxFields, 0, sizeof(struct FieldInfo*) * maxFields);
         maxFields *= 2;
-        fields = xrealloc(fields, maxFields);
       }
       break;
     case VAR_DECL:
@@ -130,12 +120,12 @@ static void recordsize_finish_type(void *gcc_data, void *plugin_data)
       break;
     default:
       if (flag_print_unknown) print_unknown_node(field, "Don't know how to handle field with such name node");
-      free(fields);
+      freeFields(fields, maxFields);
       return;
     }
   }
 
-  if (fieldCount == 0) { free(fields); return; }
+  if (fieldCount == 0) { freeFields(fields, maxFields); return; }
 
   size_t minFieldsSize = 0;
   for (size_t i = 0; i < sizeof(sizes)/sizeof(size_t); ++i) minFieldsSize += sizes[i];
@@ -147,15 +137,16 @@ static void recordsize_finish_type(void *gcc_data, void *plugin_data)
   size_t endOfBases = 0;
   if (lastBaseIdx != -1)
   {
-    endOfBases = fields[lastBaseIdx].offset + (fields[lastBaseIdx].size / fields[lastBaseIdx].align) * fields[lastBaseIdx].align;
-    if (fields[lastBaseIdx].size % fields[lastBaseIdx].align) endOfBases += fields[lastBaseIdx].align;
+    endOfBases = fields[lastBaseIdx]->offset / BITS_PER_UNIT +
+      (fields[lastBaseIdx]->size / fields[lastBaseIdx]->align) * fields[lastBaseIdx]->align / BITS_PER_UNIT;
+    if (fields[lastBaseIdx]->size % fields[lastBaseIdx]->align) endOfBases += fields[lastBaseIdx]->align / BITS_PER_UNIT;
   }
 
   size_t prePadding = 0;
   if (maxAlignFieldIdx != -1)
   {
-    size_t modulus = endOfBases % fields[maxAlignFieldIdx].align;
-    if (modulus) prePadding = fields[maxAlignFieldIdx].align - modulus;
+    size_t modulus = endOfBases % fields[maxAlignFieldIdx]->align / BITS_PER_UNIT;
+    if (modulus) prePadding = fields[maxAlignFieldIdx]->align - modulus;
   }
 
   size_t recordSize = TREE_INT_CST_LOW(TYPE_SIZE(record_type)) / BITS_PER_UNIT;
@@ -172,10 +163,12 @@ static void recordsize_finish_type(void *gcc_data, void *plugin_data)
     {
       fprintf(stderr, "# %-32s %-7s %-7s %-7s\n", "Name", "Offset", "Size", "Align");
       for (size_t i = 0; i < fieldCount; ++i)
-        fprintf(stderr, "%zu %-32s %7zu %7zu %7zu\n", i, fields[i].name, fields[i].offset, fields[i].size, fields[i].align);
+        fprintf(stderr, "%zu %-32s %7zu %7zu %7zu\n", i, fields[i]->name,
+          fields[i]->offset / BITS_PER_UNIT, fields[i]->size / BITS_PER_UNIT, fields[i]->align / BITS_PER_UNIT);
     }
   }
-  free(fields);
+
+  freeFields(fields, maxFields);
 }
 
 int plugin_init(struct plugin_name_args* info, struct plugin_gcc_version* ver)
